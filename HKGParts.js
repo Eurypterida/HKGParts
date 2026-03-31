@@ -54,44 +54,9 @@ function fetchMobis(part, brand) {
 function fetchFroza(part) {
   var ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
 
-  function httpGetCookies(urlStr, headers, cookieJar) {
-    return new Promise(function(resolve, reject) {
-      if (cookieJar) {
-        headers = Object.assign({}, headers, { 'Cookie': cookieJar });
-      }
-      https.get(urlStr, { headers: headers }, function(res) {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          var redir = res.headers.location;
-          if (redir.startsWith('/')) redir = 'https://www.froza.ru' + redir;
-          var newCookies = cookieJar || '';
-          var setCookies = res.headers['set-cookie'] || [];
-          for (var i = 0; i < setCookies.length; i++) {
-            newCookies = updateCookie(newCookies, setCookies[i]);
-          }
-          httpGetCookies(redir, headers, newCookies).then(resolve).catch(reject);
-          return;
-        }
-        var newCookies2 = cookieJar || '';
-        var setCookies2 = res.headers['set-cookie'] || [];
-        for (var j = 0; j < setCookies2.length; j++) {
-          newCookies2 = updateCookie(newCookies2, setCookies2[j]);
-        }
-        var body = '';
-        res.on('data', function(c) { body += c; });
-        res.on('end', function() { resolve({ status: res.statusCode, headers: res.headers, body: body, cookies: newCookies2 }); });
-      }).on('error', reject);
-    });
-  }
-
-  function updateCookie(jar, setCookie) {
-    var pair = setCookie.split(';')[0];
-    var name = pair.split('=')[0].trim();
-    if (!name) return jar;
-    var re = new RegExp('(?:^|;\\s*)' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=[^;]*');
-    if (jar.match(re)) {
-      return jar.replace(re, '; ' + pair);
-    }
-    return jar ? jar + '; ' + pair : pair;
+  // Free proxy to bypass datacenter IP blocks
+  function proxy(url) {
+    return 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
   }
 
   function parseFrozaJson(jsonStr) {
@@ -131,72 +96,33 @@ function fetchFroza(part) {
     return prices;
   }
 
-  var baseHeaders = {
+  var searchUrl = 'https://www.froza.ru/search.php?multi=1&detail_num=' + encodeURIComponent(part) + '&make_name=&currency=&country=10&region_id=0&discount_id=0&sort=&add_warehouse=';
+
+  // Step 1: Get search page through proxy
+  return httpGet(proxy(searchUrl), {
     'User-Agent': ua,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'identity',
-    'Cache-Control': 'no-cache',
-    'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"Windows"',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-User': '?1',
-    'Upgrade-Insecure-Requests': '1'
-  };
+    'Accept': 'text/html'
+  }).then(function(pageRes) {
+    var codeMatch = pageRes.body.match(/data-code="([^"]+)"/);
+    if (!codeMatch) {
+      console.log('[Froza] No code. Page preview:', pageRes.body.substring(0, 300));
+      return { found: false, error: 'No session code', totalOffers: 0, top5: [] };
+    }
+    var code = codeMatch[1];
+    console.log('[Froza] Got code:', code);
 
-  // Step 1: Visit homepage to get initial cookies
-  return httpGetCookies('https://www.froza.ru/', baseHeaders, '').then(function(homeRes) {
-    var cookies = homeRes.cookies || '';
-
-    // Step 2: Visit search page with cookies
-    var searchUrl = 'https://www.froza.ru/search.php?multi=1&detail_num=' + encodeURIComponent(part) + '&make_name=&currency=&country=10&region_id=0&discount_id=0&sort=&add_warehouse=';
-    var searchHeaders = Object.assign({}, baseHeaders, {
-      'Sec-Fetch-Site': 'same-origin',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Dest': 'document',
-      'Referer': 'https://www.froza.ru/'
-    });
-    delete searchHeaders['Sec-Fetch-User'];
-
-    return httpGetCookies(searchUrl, searchHeaders, cookies).then(function(pageRes) {
-      var codeMatch = pageRes.body.match(/data-code="([^"]+)"/);
-      if (!codeMatch) codeMatch = pageRes.body.match(/code["\s:=]+["']([a-f0-9]+)["']/i);
-      if (!codeMatch) {
-        // Debug: save page to check what we got
-        console.log('[Froza] Page length:', pageRes.body.length, 'Status:', pageRes.status);
-        console.log('[Froza] Page preview:', pageRes.body.substring(0, 500));
-        return { found: false, error: 'No session code (Froza may block cloud IPs)', totalOffers: 0, top5: [] };
+    // Step 2: Call API through proxy
+    var apiUrl = 'https://www.froza.ru/index.php/search/original.json?multi=1&detail_num=' + encodeURIComponent(part) + '&make_name=&currency=RUB&country=10&region_id=0&discount_id=0&sort=sortByPrice&add_warehouse=&code=' + code;
+    return httpGet(proxy(apiUrl), {
+      'User-Agent': ua,
+      'Accept': 'application/json'
+    }).then(function(apiRes) {
+      var prices = parseFrozaJson(apiRes.body);
+      prices.sort(function(a, b) { return a.price - b.price; });
+      if (prices.length > 0) {
+        return { found: true, totalOffers: prices.length, top5: prices.slice(0, 5) };
       }
-      var code = codeMatch[1];
-      cookies = pageRes.cookies || cookies;
-
-      // Step 3: Call API
-      var apiUrl = 'https://www.froza.ru/index.php/search/original.json?multi=1&detail_num=' + encodeURIComponent(part) + '&make_name=&currency=RUB&country=10&region_id=0&discount_id=0&sort=sortByPrice&add_warehouse=&code=' + code;
-      var apiHeaders = {
-        'User-Agent': ua,
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'Accept-Language': 'ru-RU,ru;q=0.9',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Referer': searchUrl,
-        'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-        'Sec-Ch-Ua-Mobile': '?0',
-        'Sec-Ch-Ua-Platform': '"Windows"',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin'
-      };
-
-      return httpGetCookies(apiUrl, apiHeaders, cookies).then(function(apiRes) {
-        var prices = parseFrozaJson(apiRes.body);
-        prices.sort(function(a, b) { return a.price - b.price; });
-        if (prices.length > 0) {
-          return { found: true, totalOffers: prices.length, top5: prices.slice(0, 5) };
-        }
-        return { found: false, error: 'No offers found', totalOffers: 0, top5: [] };
-      });
+      return { found: false, error: 'No offers found', totalOffers: 0, top5: [] };
     });
   }).catch(function(e) {
     return { found: false, error: 'Froza error: ' + e.message, totalOffers: 0, top5: [] };
