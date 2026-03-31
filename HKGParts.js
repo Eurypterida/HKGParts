@@ -1,5 +1,6 @@
 const http = require('http');
 const https = require('https');
+const tls = require('tls');
 const url = require('url');
 
 const PORT = 3000;
@@ -80,42 +81,97 @@ function fetchFroza(part) {
       var target = new URL(targetUrl);
       var auth = Buffer.from(proxyUser + ':' + proxyPass).toString('base64');
 
-      var options = {
+      // Step 1: CONNECT tunnel through proxy
+      var tunnelReq = http.request({
         hostname: proxy.host,
         port: proxy.port,
-        method: 'GET',
-        path: targetUrl,
+        method: 'CONNECT',
+        path: target.hostname + ':443',
         headers: {
-          'User-Agent': ua,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8',
-          'Host': target.host,
           'Proxy-Authorization': 'Basic ' + auth
         }
-      };
+      });
 
-      var req = https.request(options, function(res) {
-        // Follow redirects
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          var redir = res.headers.location;
-          if (redir.startsWith('/')) redir = target.protocol + '//' + target.host + redir;
-          proxyGet(redir).then(resolve).catch(reject);
-          res.resume();
+      tunnelReq.on('connect', function(res, socket) {
+        if (res.statusCode !== 200) {
+          socket.destroy();
+          reject(new Error('CONNECT failed: ' + res.statusCode));
           return;
         }
-        var body = '';
-        res.on('data', function(c) { body += c; });
-        res.on('end', function() { resolve({ status: res.statusCode, body: body }); });
+
+        // Step 2: TLS over the tunnel
+        var tlsSocket = tls.connect({
+          socket: socket,
+          servername: target.hostname,
+          rejectUnauthorized: false
+        }, function() {
+          var path = target.pathname + target.search;
+          var reqStr = 'GET ' + path + ' HTTP/1.1\r\n' +
+            'Host: ' + target.hostname + '\r\n' +
+            'User-Agent: ' + ua + '\r\n' +
+            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n' +
+            'Accept-Language: ru-RU,ru;q=0.9,en-US;q=0.8\r\n' +
+            'Connection: close\r\n' +
+            '\r\n';
+          tlsSocket.write(reqStr);
+        });
+
+        var data = '';
+        tlsSocket.on('data', function(chunk) { data += chunk.toString(); });
+        tlsSocket.on('end', function() {
+          // Parse HTTP response
+          var headerEnd = data.indexOf('\r\n\r\n');
+          if (headerEnd === -1) {
+            reject(new Error('Invalid HTTP response'));
+            return;
+          }
+          var headers = data.substring(0, headerEnd);
+          var body = data.substring(headerEnd + 4);
+          var statusMatch = headers.match(/HTTP\/\d\.\d (\d+)/);
+          var status = statusMatch ? parseInt(statusMatch[1]) : 0;
+
+          // Handle chunked encoding
+          if (headers.toLowerCase().indexOf('transfer-encoding: chunked') !== -1) {
+            body = decodeChunked(body);
+          }
+
+          // Follow redirects
+          var locMatch = headers.match(/location:\s*(.+)/i);
+          if (status >= 300 && status < 400 && locMatch) {
+            var redir = locMatch[1].trim();
+            if (redir.startsWith('/')) redir = target.protocol + '//' + target.host + redir;
+            proxyGet(redir).then(resolve).catch(reject);
+            return;
+          }
+
+          resolve({ status: status, body: body });
+        });
+        tlsSocket.on('error', function(e) { reject(new Error('TLS error: ' + e.message)); });
       });
-      req.on('error', function(e) {
-        reject(new Error('Proxy error: ' + e.message));
+
+      tunnelReq.on('error', function(e) { reject(new Error('Tunnel error: ' + e.message)); });
+      tunnelReq.setTimeout(15000, function() {
+        tunnelReq.destroy();
+        reject(new Error('Tunnel timeout'));
       });
-      req.setTimeout(15000, function() {
-        req.destroy();
-        reject(new Error('Proxy timeout'));
-      });
-      req.end();
+      tunnelReq.end();
     });
+  }
+
+  function decodeChunked(str) {
+    var result = '';
+    var pos = 0;
+    while (pos < str.length) {
+      var lineEnd = str.indexOf('\r\n', pos);
+      if (lineEnd === -1) break;
+      var sizeStr = str.substring(pos, lineEnd).trim();
+      var size = parseInt(sizeStr, 16);
+      if (size === 0) break;
+      var dataStart = lineEnd + 2;
+      result += str.substring(dataStart, dataStart + size);
+      pos = dataStart + size + 2;
+    }
+    return result;
   }
 
   function parseFrozaJson(jsonStr) {
