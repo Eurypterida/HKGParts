@@ -1,0 +1,11 @@
+{
+  "name": "mobis-parts-search",
+  "version": "1.0.0",
+  "main": "HKGParts.js",
+  "scripts": {
+    "start": "node HKGParts.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
