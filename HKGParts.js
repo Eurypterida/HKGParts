@@ -54,9 +54,68 @@ function fetchMobis(part, brand) {
 function fetchFroza(part) {
   var ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
 
-  // Free proxy to bypass datacenter IP blocks
-  function proxy(url) {
-    return 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
+  // Webshare.io proxies (shared credentials)
+  var proxies = [
+    { host: '31.59.20.176', port: 6754 },
+    { host: '23.95.150.145', port: 6114 },
+    { host: '198.23.239.134', port: 6540 },
+    { host: '45.38.107.97', port: 6014 },
+    { host: '107.172.163.27', port: 6543 },
+    { host: '198.105.121.200', port: 6462 },
+    { host: '216.10.27.159', port: 6837 },
+    { host: '142.111.67.146', port: 5611 },
+    { host: '191.96.254.138', port: 6185 },
+    { host: '31.58.9.4', port: 6077 }
+  ];
+  var proxyUser = 'lqnxzqbi';
+  var proxyPass = '0ahou7daw751';
+
+  function getRandomProxy() {
+    return proxies[Math.floor(Math.random() * proxies.length)];
+  }
+
+  function proxyGet(targetUrl) {
+    return new Promise(function(resolve, reject) {
+      var proxy = getRandomProxy();
+      var target = new URL(targetUrl);
+      var auth = Buffer.from(proxyUser + ':' + proxyPass).toString('base64');
+
+      var options = {
+        hostname: proxy.host,
+        port: proxy.port,
+        method: 'GET',
+        path: targetUrl,
+        headers: {
+          'User-Agent': ua,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8',
+          'Host': target.host,
+          'Proxy-Authorization': 'Basic ' + auth
+        }
+      };
+
+      var req = https.request(options, function(res) {
+        // Follow redirects
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          var redir = res.headers.location;
+          if (redir.startsWith('/')) redir = target.protocol + '//' + target.host + redir;
+          proxyGet(redir).then(resolve).catch(reject);
+          res.resume();
+          return;
+        }
+        var body = '';
+        res.on('data', function(c) { body += c; });
+        res.on('end', function() { resolve({ status: res.statusCode, body: body }); });
+      });
+      req.on('error', function(e) {
+        reject(new Error('Proxy error: ' + e.message));
+      });
+      req.setTimeout(15000, function() {
+        req.destroy();
+        reject(new Error('Proxy timeout'));
+      });
+      req.end();
+    });
   }
 
   function parseFrozaJson(jsonStr) {
@@ -98,25 +157,17 @@ function fetchFroza(part) {
 
   var searchUrl = 'https://www.froza.ru/search.php?multi=1&detail_num=' + encodeURIComponent(part) + '&make_name=&currency=&country=10&region_id=0&discount_id=0&sort=&add_warehouse=';
 
-  // Step 1: Get search page through proxy
-  return httpGet(proxy(searchUrl), {
-    'User-Agent': ua,
-    'Accept': 'text/html'
-  }).then(function(pageRes) {
+  return proxyGet(searchUrl).then(function(pageRes) {
     var codeMatch = pageRes.body.match(/data-code="([^"]+)"/);
     if (!codeMatch) {
-      console.log('[Froza] No code. Page preview:', pageRes.body.substring(0, 300));
+      console.log('[Froza] No code found. Status:', pageRes.status, 'Preview:', pageRes.body.substring(0, 300));
       return { found: false, error: 'No session code', totalOffers: 0, top5: [] };
     }
     var code = codeMatch[1];
     console.log('[Froza] Got code:', code);
 
-    // Step 2: Call API through proxy
     var apiUrl = 'https://www.froza.ru/index.php/search/original.json?multi=1&detail_num=' + encodeURIComponent(part) + '&make_name=&currency=RUB&country=10&region_id=0&discount_id=0&sort=sortByPrice&add_warehouse=&code=' + code;
-    return httpGet(proxy(apiUrl), {
-      'User-Agent': ua,
-      'Accept': 'application/json'
-    }).then(function(apiRes) {
+    return proxyGet(apiUrl).then(function(apiRes) {
       var prices = parseFrozaJson(apiRes.body);
       prices.sort(function(a, b) { return a.price - b.price; });
       if (prices.length > 0) {
@@ -125,6 +176,7 @@ function fetchFroza(part) {
       return { found: false, error: 'No offers found', totalOffers: 0, top5: [] };
     });
   }).catch(function(e) {
+    console.log('[Froza] Error:', e.message);
     return { found: false, error: 'Froza error: ' + e.message, totalOffers: 0, top5: [] };
   });
 }
